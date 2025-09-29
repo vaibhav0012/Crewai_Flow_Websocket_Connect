@@ -1,36 +1,42 @@
-import os
+# server.py
 import asyncio
+import logging
 import threading
 import queue
-import logging
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from crew.calculator_flow import CalculatorFlow
+from fastapi.responses import HTMLResponse
+
+from flow_logic import CalculatorFlow
+from client_page import CLIENT_HTML
 
 logging.basicConfig(level=logging.INFO)
-
 app = FastAPI()
+
+@app.get("/")
+async def root():
+    return HTMLResponse(CLIENT_HTML)
 
 @app.websocket("/calc")
 async def calc_socket(ws: WebSocket):
     await ws.accept()
-    prompts_q = queue.Queue()
-    answers_q = queue.Queue()
+
+    prompts_q: "queue.Queue[tuple[str,bool]]" = queue.Queue()
+    answers_q: "queue.Queue[str]" = queue.Queue()
 
     def send_user(msg: str) -> None:
         prompts_q.put((msg, False))
 
     def ask_user(prompt: str) -> str:
         prompts_q.put((prompt, True))
-        ans = answers_q.get()
-        return ans
+        return answers_q.get()   # blocks in worker thread
 
     flow = CalculatorFlow(send_user=send_user, ask_user=ask_user)
 
     def run_flow():
         try:
-            flow.kickoff()
+            flow.kickoff()   # synchronous kickoff
         except Exception as e:
-            logging.exception("Flow raised an exception")
+            logging.exception("Flow raised exception")
             prompts_q.put((f"[flow error] {e}", False))
 
     worker = threading.Thread(target=run_flow, daemon=True)
@@ -45,28 +51,19 @@ async def calc_socket(ws: WebSocket):
             try:
                 await ws.send_text(msg)
             except WebSocketDisconnect:
-                logging.info("client disconnected while sending")
                 if expects_reply:
                     answers_q.put("")
                 break
+
             if expects_reply:
                 try:
                     answer = await ws.receive_text()
                 except WebSocketDisconnect:
-                    logging.info("client disconnected while waiting for answer")
                     answers_q.put("")
                     break
                 answers_q.put(answer)
-    except WebSocketDisconnect:
-        logging.info("client disconnected")
     finally:
         if worker.is_alive():
-            try:
-                answers_q.put("")
-            except Exception:
-                pass
+            answers_q.put("")  # unblock if waiting
             worker.join(timeout=1)
-        try:
-            await ws.close()
-        except Exception:
-            pass
+        await ws.close()
