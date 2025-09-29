@@ -1,0 +1,6 @@
+crewai
+crewai[tools]
+websockets
+python-dotenv
+openai
+fastapi
